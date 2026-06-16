@@ -1,5 +1,5 @@
 # Stage 1: Base image with dependencies
-FROM golang:1.24-trixie AS base
+FROM golang:1.26-trixie AS base
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
