@@ -71,15 +71,24 @@ func initDB() *gorm.DB {
 }
 
 func postgresDSN() string {
-	return fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=UTC",
-		envDefault("DB_HOST", "localhost"),
-		envDefault("DB_PORT", "5432"),
-		os.Getenv("DB_USER"),
-		os.Getenv("DB_PASSWORD"),
-		os.Getenv("DB_NAME"),
-		envDefault("DB_SSLMODE", "disable"),
-	)
+	parts := []string{
+		"host=" + envDefault("DB_HOST", "localhost"),
+		"port=" + envDefault("DB_PORT", "5432"),
+		"user=" + os.Getenv("DB_USER"),
+		"dbname=" + os.Getenv("DB_NAME"),
+		"sslmode=" + envDefault("DB_SSLMODE", "disable"),
+		"TimeZone=UTC",
+	}
+
+	// Only include the password when set. An empty "password=" in a
+	// keyword/value DSN makes the parser consume the following key (dbname)
+	// as the password value, leaving the database name unset. Peer auth over
+	// the local socket supplies no password.
+	if password := os.Getenv("DB_PASSWORD"); password != "" {
+		parts = append(parts, "password="+password)
+	}
+
+	return strings.Join(parts, " ")
 }
 
 func envDefault(key, fallback string) string {
