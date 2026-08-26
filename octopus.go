@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,13 +38,36 @@ type Usage struct {
 	UsageType     string    `json:"usage_type" gorm:"primaryKey"`
 }
 
+// OctopusAPIResponse retains the source evidence for each completed HTTP
+// request.  A successful HTTP response can legitimately contain no readings,
+// so this must be recorded separately from the usage rows that are upserted.
+type OctopusAPIResponse struct {
+	ID          uint      `gorm:"primaryKey"`
+	RequestedAt time.Time `gorm:"not null"`
+	UsageType   string    `gorm:"not null"`
+	RequestURL  string    `gorm:"not null"`
+	StatusCode  int       `gorm:"not null"`
+	Body        string    `gorm:"not null"`
+	BodySHA256  string    `gorm:"not null"`
+}
+
+type octopusHTTPResponse struct {
+	statusCode int
+	body       []byte
+}
+
 func downloadAndStoreUsage(db *gorm.DB, url string, usageType string) error {
-	jsonData, err := downloadFromOctopus(url)
+	response, err := downloadFromOctopus(url)
+	if response != nil {
+		if auditErr := writeAPIResponseToDB(db, usageType, url, response); auditErr != nil {
+			return auditErr
+		}
+	}
 	if err != nil {
 		return err
 	}
 
-	usageData, err := parseOctopusData(jsonData)
+	usageData, err := parseOctopusData(response.body)
 	if err != nil {
 		return err
 	}
@@ -118,7 +142,7 @@ func buildOctopusURLForWindow(baseURL string, periodFrom, periodTo time.Time) st
 	)
 }
 
-func downloadFromOctopus(url string) ([]byte, error) {
+func downloadFromOctopus(url string) (*octopusHTTPResponse, error) {
 	apiKey := os.Getenv("OCTOPUS_API_KEY")
 	if apiKey == "" {
 		return nil, errors.New("OCTOPUS_API_KEY not set in .env file")
@@ -146,18 +170,17 @@ func downloadFromOctopus(url string) ([]byte, error) {
 		time.Sleep(time.Duration(attempt) * time.Second)
 	}
 	defer resp.Body.Close()
+	body, readErr := io.ReadAll(resp.Body)
+	response := &octopusHTTPResponse{statusCode: resp.StatusCode, body: body}
+	if readErr != nil {
+		return response, fmt.Errorf("reading response body: %w", readErr)
+	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("API request failed with status code %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return response, fmt.Errorf("API request failed with status code %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response body: %w", err)
-	}
-
-	return body, nil
+	return response, nil
 }
 
 func parseOctopusData(jsonData []byte) (Response, error) {
@@ -188,6 +211,23 @@ func writeUsageToDb(db *gorm.DB, usages []Usage, usageType string) error {
 	}
 
 	fmt.Printf("Successfully saved %d usage records to the database.\n", result.RowsAffected)
+	return nil
+}
+
+func writeAPIResponseToDB(db *gorm.DB, usageType, requestURL string, response *octopusHTTPResponse) error {
+	digest := sha256.Sum256(response.body)
+	audit := OctopusAPIResponse{
+		RequestedAt: time.Now().UTC(),
+		UsageType:   usageType,
+		RequestURL:  requestURL,
+		StatusCode:  response.statusCode,
+		Body:        string(response.body),
+		BodySHA256:  fmt.Sprintf("%x", digest),
+	}
+	if err := db.Create(&audit).Error; err != nil {
+		return fmt.Errorf("recording Octopus API response: %w", err)
+	}
+	log.Printf("Recorded Octopus %s response: status=%d bytes=%d sha256=%s", usageType, response.statusCode, len(response.body), audit.BodySHA256)
 	return nil
 }
 

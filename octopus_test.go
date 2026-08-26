@@ -123,3 +123,27 @@ func TestWriteUsageToDb_OnConflict(t *testing.T) {
 		t.Errorf("Expected 2 usage records, but got %d", len(usages))
 	}
 }
+
+func TestWriteAPIResponseToDB(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to connect database: %v", err)
+	}
+	db.AutoMigrate(&OctopusAPIResponse{})
+
+	response := &octopusHTTPResponse{
+		statusCode: 200,
+		body:       []byte(`{"count":0,"next":null,"previous":null,"results":[]}`),
+	}
+	if err := writeAPIResponseToDB(db, "electricity", "https://example.test/consumption/", response); err != nil {
+		t.Fatalf("writeAPIResponseToDB returned error: %v", err)
+	}
+
+	var audit OctopusAPIResponse
+	if err := db.First(&audit).Error; err != nil {
+		t.Fatalf("reading API response audit: %v", err)
+	}
+	if audit.StatusCode != 200 || audit.Body != string(response.body) || audit.BodySHA256 == "" {
+		t.Errorf("unexpected response audit: %#v", audit)
+	}
+}
