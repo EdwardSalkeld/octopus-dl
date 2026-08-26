@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -17,6 +20,7 @@ func main() {
 	backfillFrom := flag.String("backfill-from", "", "UTC start timestamp for Octopus backfill, e.g. 2026-04-10T00:00:00Z.")
 	backfillTo := flag.String("backfill-to", "", "UTC end timestamp for Octopus backfill, e.g. 2026-04-12T00:00:00Z.")
 	backfillType := flag.String("backfill-type", "both", "Octopus usage type to backfill: electricity, gas, or both.")
+	listenAddr := flag.String("listen-addr", "", "serve a manual-run HTTP endpoint at this address")
 	flag.Parse()
 
 	// .env is optional: the systemd unit supplies configuration via the
@@ -26,18 +30,69 @@ func main() {
 	}
 
 	db := initDB()
+	if *listenAddr != "" {
+		if *backfillFrom != "" || *backfillTo != "" {
+			log.Fatal("-listen-addr cannot be combined with backfill options")
+		}
+		log.Fatal(serveManualRunEndpoint(*listenAddr, func() error {
+			return runDailyDownload(db)
+		}))
+	}
 
 	if *backfillFrom != "" || *backfillTo != "" {
 		runBackfill(db, *backfillFrom, *backfillTo, *backfillType)
 		return
 	}
 
+	if err := runDailyDownload(db); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func runDailyDownload(db *gorm.DB) error {
 	if err := OctopusElectricityTask(db); err != nil {
-		log.Fatalf("Octopus electricity download failed: %v", err)
+		return fmt.Errorf("Octopus electricity download failed: %w", err)
 	}
 	if err := OctopusGasTask(db); err != nil {
-		log.Fatalf("Octopus gas download failed: %v", err)
+		return fmt.Errorf("Octopus gas download failed: %w", err)
 	}
+	return nil
+}
+
+func serveManualRunEndpoint(listenAddr string, run func() error) error {
+	server := &http.Server{
+		Addr:              listenAddr,
+		Handler:           manualRunHandler(run),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	log.Printf("Serving manual Octopus download endpoint on %s", listenAddr)
+	return server.ListenAndServe()
+}
+
+func manualRunHandler(run func() error) http.Handler {
+	var running atomic.Bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /run", func(w http.ResponseWriter, _ *http.Request) {
+		if !running.CompareAndSwap(false, true) {
+			http.Error(w, "an Octopus download is already running", http.StatusConflict)
+			return
+		}
+		defer running.Store(false)
+
+		if err := run(); err != nil {
+			log.Printf("Manual Octopus download failed: %v", err)
+			http.Error(w, "Octopus download failed", http.StatusBadGateway)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "completed"})
+	})
+
+	return mux
 }
 
 func runBackfill(db *gorm.DB, backfillFrom, backfillTo, backfillType string) {

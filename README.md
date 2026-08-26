@@ -42,6 +42,18 @@ timestamps:
 
 `-backfill-type` accepts `electricity`, `gas`, or `both` (default `both`).
 
+### Manual trigger endpoint
+
+Pass `-listen-addr` to keep the downloader running as a small HTTP service.
+`POST /run` performs one normal daily download and returns only after both
+meter requests have finished. Concurrent requests return `409 Conflict`, so a
+manual trigger cannot overlap another manual trigger. `GET /healthz` returns
+`204 No Content`.
+
+The endpoint has no built-in authentication and must be bound to loopback or
+protected by a reverse proxy. The NixOS deployment exposes it only to the
+Magpie worker over the tailnet.
+
 ## Database
 
 The `usages` table is expected to already exist:
