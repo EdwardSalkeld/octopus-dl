@@ -42,13 +42,14 @@ type Usage struct {
 // request.  A successful HTTP response can legitimately contain no readings,
 // so this must be recorded separately from the usage rows that are upserted.
 type OctopusAPIResponse struct {
-	ID          uint      `gorm:"primaryKey"`
-	RequestedAt time.Time `gorm:"not null"`
-	UsageType   string    `gorm:"not null"`
-	RequestURL  string    `gorm:"not null"`
-	StatusCode  int       `gorm:"not null"`
-	Body        string    `gorm:"not null"`
-	BodySHA256  string    `gorm:"not null"`
+	ID             uint      `gorm:"primaryKey"`
+	RequestedAt    time.Time `gorm:"not null"`
+	UsageType      string    `gorm:"not null"`
+	RequestURL     string    `gorm:"not null"`
+	StatusCode     int       `gorm:"not null"`
+	Body           string    `gorm:"not null"`
+	BodySHA256     string    `gorm:"not null"`
+	TransportError *string
 }
 
 type octopusHTTPResponse struct {
@@ -64,6 +65,11 @@ func downloadAndStoreUsage(db *gorm.DB, url string, usageType string) error {
 		}
 	}
 	if err != nil {
+		if response == nil {
+			if auditErr := writeAPITransportFailureToDB(db, usageType, url, err); auditErr != nil {
+				return auditErr
+			}
+		}
 		return err
 	}
 
@@ -77,6 +83,25 @@ func downloadAndStoreUsage(db *gorm.DB, url string, usageType string) error {
 	}
 
 	fmt.Printf("Successfully downloaded and processed %s data.\n", usageType)
+	return nil
+}
+
+func writeAPITransportFailureToDB(db *gorm.DB, usageType, requestURL string, requestErr error) error {
+	emptyBodyDigest := sha256.Sum256(nil)
+	transportError := requestErr.Error()
+	audit := OctopusAPIResponse{
+		RequestedAt:    time.Now().UTC(),
+		UsageType:      usageType,
+		RequestURL:     requestURL,
+		StatusCode:     0,
+		Body:           "",
+		BodySHA256:     fmt.Sprintf("%x", emptyBodyDigest),
+		TransportError: &transportError,
+	}
+	if err := db.Create(&audit).Error; err != nil {
+		return fmt.Errorf("recording Octopus %s transport failure: %w", usageType, err)
+	}
+	log.Printf("Recorded Octopus %s transport failure: %s", usageType, transportError)
 	return nil
 }
 
