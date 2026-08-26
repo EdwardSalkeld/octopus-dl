@@ -72,7 +72,11 @@ func withDownloadLock(db *gorm.DB, run func(*gorm.DB) error) error {
 				log.Printf("Releasing Octopus download lock: %v", err)
 			}
 		}()
-		return run(lockedDB)
+		// Raw(...).Scan(&acquired) records the bool destination in GORM's
+		// statement metadata. Reset that statement while retaining the pinned
+		// connection, otherwise a later Create([]Usage) reuses the bool schema
+		// and panics in GORM's reflection code.
+		return run(lockedDB.Session(&gorm.Session{NewDB: true}))
 	})
 }
 
