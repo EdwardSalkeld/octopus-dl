@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -15,6 +16,10 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
+
+const octopusDownloadAdvisoryLock int64 = 4_291_410_001
+
+var errDownloadInProgress = errors.New("an Octopus download is already running")
 
 func main() {
 	backfillFrom := flag.String("backfill-from", "", "UTC start timestamp for Octopus backfill, e.g. 2026-04-10T00:00:00Z.")
@@ -35,18 +40,40 @@ func main() {
 			log.Fatal("-listen-addr cannot be combined with backfill options")
 		}
 		log.Fatal(serveManualRunEndpoint(*listenAddr, func() error {
-			return runDailyDownload(db)
+			return withDownloadLock(db, runDailyDownload)
 		}))
 	}
 
 	if *backfillFrom != "" || *backfillTo != "" {
-		runBackfill(db, *backfillFrom, *backfillTo, *backfillType)
+		if err := withDownloadLock(db, func(lockedDB *gorm.DB) error {
+			return runBackfill(lockedDB, *backfillFrom, *backfillTo, *backfillType)
+		}); err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
 
-	if err := runDailyDownload(db); err != nil {
+	if err := withDownloadLock(db, runDailyDownload); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func withDownloadLock(db *gorm.DB, run func(*gorm.DB) error) error {
+	return db.Connection(func(lockedDB *gorm.DB) error {
+		var acquired bool
+		if err := lockedDB.Raw("SELECT pg_try_advisory_lock(?)", octopusDownloadAdvisoryLock).Scan(&acquired).Error; err != nil {
+			return fmt.Errorf("acquiring Octopus download lock: %w", err)
+		}
+		if !acquired {
+			return errDownloadInProgress
+		}
+		defer func() {
+			if err := lockedDB.Exec("SELECT pg_advisory_unlock(?)", octopusDownloadAdvisoryLock).Error; err != nil {
+				log.Printf("Releasing Octopus download lock: %v", err)
+			}
+		}()
+		return run(lockedDB)
+	})
 }
 
 func runDailyDownload(db *gorm.DB) error {
@@ -83,6 +110,10 @@ func manualRunHandler(run func() error) http.Handler {
 		defer running.Store(false)
 
 		if err := run(); err != nil {
+			if errors.Is(err, errDownloadInProgress) {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
 			log.Printf("Manual Octopus download failed: %v", err)
 			http.Error(w, "Octopus download failed", http.StatusBadGateway)
 			return
@@ -95,25 +126,26 @@ func manualRunHandler(run func() error) http.Handler {
 	return mux
 }
 
-func runBackfill(db *gorm.DB, backfillFrom, backfillTo, backfillType string) {
+func runBackfill(db *gorm.DB, backfillFrom, backfillTo, backfillType string) error {
 	if backfillFrom == "" || backfillTo == "" {
-		log.Fatal("Both -backfill-from and -backfill-to must be provided")
+		return errors.New("both -backfill-from and -backfill-to must be provided")
 	}
 
 	periodFrom, err := time.Parse(time.RFC3339, backfillFrom)
 	if err != nil {
-		log.Fatalf("Invalid -backfill-from value: %v", err)
+		return fmt.Errorf("invalid -backfill-from value: %w", err)
 	}
 	periodTo, err := time.Parse(time.RFC3339, backfillTo)
 	if err != nil {
-		log.Fatalf("Invalid -backfill-to value: %v", err)
+		return fmt.Errorf("invalid -backfill-to value: %w", err)
 	}
 
 	usageType := strings.ToLower(backfillType)
 	fmt.Printf("Running Octopus backfill for %s from %s to %s\n", usageType, periodFrom.Format(time.RFC3339), periodTo.Format(time.RFC3339))
 	if err := OctopusBackfillTask(db, periodFrom, periodTo, usageType); err != nil {
-		log.Fatalf("Octopus backfill failed: %v", err)
+		return fmt.Errorf("Octopus backfill failed: %w", err)
 	}
+	return nil
 }
 
 func initDB() *gorm.DB {
