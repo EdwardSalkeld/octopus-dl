@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -20,6 +21,12 @@ import (
 const octopusDownloadAdvisoryLock int64 = 4_291_410_001
 
 var errDownloadInProgress = errors.New("an Octopus download is already running")
+
+type manualBackfillRequest struct {
+	PeriodFrom string `json:"period_from"`
+	PeriodTo   string `json:"period_to"`
+	UsageType  string `json:"usage_type"`
+}
 
 func main() {
 	backfillFrom := flag.String("backfill-from", "", "UTC start timestamp for Octopus backfill, e.g. 2026-04-10T00:00:00Z.")
@@ -39,8 +46,13 @@ func main() {
 		if *backfillFrom != "" || *backfillTo != "" {
 			log.Fatal("-listen-addr cannot be combined with backfill options")
 		}
-		log.Fatal(serveManualRunEndpoint(*listenAddr, func() error {
-			return withDownloadLock(db, runDailyDownload)
+		log.Fatal(serveManualRunEndpoint(*listenAddr, func(backfill *manualBackfillRequest) error {
+			return withDownloadLock(db, func(lockedDB *gorm.DB) error {
+				if backfill == nil {
+					return runDailyDownload(lockedDB)
+				}
+				return runBackfill(lockedDB, backfill.PeriodFrom, backfill.PeriodTo, backfill.UsageType)
+			})
 		}))
 	}
 
@@ -90,7 +102,7 @@ func runDailyDownload(db *gorm.DB) error {
 	return nil
 }
 
-func serveManualRunEndpoint(listenAddr string, run func() error) error {
+func serveManualRunEndpoint(listenAddr string, run func(*manualBackfillRequest) error) error {
 	server := &http.Server{
 		Addr:              listenAddr,
 		Handler:           manualRunHandler(run),
@@ -100,20 +112,26 @@ func serveManualRunEndpoint(listenAddr string, run func() error) error {
 	return server.ListenAndServe()
 }
 
-func manualRunHandler(run func() error) http.Handler {
+func manualRunHandler(run func(*manualBackfillRequest) error) http.Handler {
 	var running atomic.Bool
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-	mux.HandleFunc("POST /run", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("POST /run", func(w http.ResponseWriter, r *http.Request) {
+		backfill, err := decodeManualBackfillRequest(w, r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
 		if !running.CompareAndSwap(false, true) {
 			http.Error(w, "an Octopus download is already running", http.StatusConflict)
 			return
 		}
 		defer running.Store(false)
 
-		if err := run(); err != nil {
+		if err := run(backfill); err != nil {
 			if errors.Is(err, errDownloadInProgress) {
 				http.Error(w, err.Error(), http.StatusConflict)
 				return
@@ -128,6 +146,49 @@ func manualRunHandler(run func() error) http.Handler {
 	})
 
 	return mux
+}
+
+func decodeManualBackfillRequest(w http.ResponseWriter, r *http.Request) (*manualBackfillRequest, error) {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+	decoder.DisallowUnknownFields()
+	var request manualBackfillRequest
+	if err := decoder.Decode(&request); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("invalid JSON request: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("invalid JSON request: body must contain one object")
+	}
+
+	if request.PeriodFrom == "" && request.PeriodTo == "" && request.UsageType == "" {
+		return nil, nil
+	}
+	if request.PeriodFrom == "" || request.PeriodTo == "" {
+		return nil, errors.New("period_from and period_to must both be provided")
+	}
+
+	periodFrom, err := time.Parse(time.RFC3339, request.PeriodFrom)
+	if err != nil {
+		return nil, fmt.Errorf("invalid period_from: %w", err)
+	}
+	periodTo, err := time.Parse(time.RFC3339, request.PeriodTo)
+	if err != nil {
+		return nil, fmt.Errorf("invalid period_to: %w", err)
+	}
+	if !periodFrom.Before(periodTo) {
+		return nil, errors.New("period_from must be before period_to")
+	}
+
+	request.UsageType = strings.ToLower(request.UsageType)
+	if request.UsageType == "" {
+		request.UsageType = "both"
+	}
+	if request.UsageType != "electricity" && request.UsageType != "gas" && request.UsageType != "both" {
+		return nil, errors.New("usage_type must be electricity, gas, or both")
+	}
+	return &request, nil
 }
 
 func runBackfill(db *gorm.DB, backfillFrom, backfillTo, backfillType string) error {

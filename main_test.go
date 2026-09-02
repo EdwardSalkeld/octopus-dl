@@ -24,7 +24,10 @@ func TestPostgresDSNOmitsEmptyPassword(t *testing.T) {
 
 func TestManualRunEndpoint(t *testing.T) {
 	var calls int
-	server := httptest.NewServer(manualRunHandler(func() error {
+	server := httptest.NewServer(manualRunHandler(func(backfill *manualBackfillRequest) error {
+		if backfill != nil {
+			t.Fatalf("expected daily download, got backfill %#v", backfill)
+		}
 		calls++
 		return nil
 	}))
@@ -46,6 +49,63 @@ func TestManualRunEndpoint(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /run status=%d, want %d", response.StatusCode, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestManualRunEndpointBackfill(t *testing.T) {
+	var received *manualBackfillRequest
+	server := httptest.NewServer(manualRunHandler(func(backfill *manualBackfillRequest) error {
+		received = backfill
+		return nil
+	}))
+	defer server.Close()
+
+	response, err := http.Post(server.URL+"/run", "application/json", strings.NewReader(`{"period_from":"2026-08-24T00:00:00Z","period_to":"2026-08-31T00:00:00Z","usage_type":"GAS"}`))
+	if err != nil {
+		t.Fatalf("POST /run: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("POST /run status=%d, want %d", response.StatusCode, http.StatusOK)
+	}
+	if received == nil || received.PeriodFrom != "2026-08-24T00:00:00Z" || received.PeriodTo != "2026-08-31T00:00:00Z" || received.UsageType != "gas" {
+		t.Fatalf("unexpected backfill request: %#v", received)
+	}
+}
+
+func TestManualRunEndpointRejectsInvalidBackfill(t *testing.T) {
+	called := false
+	server := httptest.NewServer(manualRunHandler(func(*manualBackfillRequest) error {
+		called = true
+		return nil
+	}))
+	defer server.Close()
+
+	response, err := http.Post(server.URL+"/run", "application/json", strings.NewReader(`{"period_from":"2026-08-31T00:00:00Z","period_to":"2026-08-24T00:00:00Z"}`))
+	if err != nil {
+		t.Fatalf("POST /run: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || called {
+		t.Fatalf("unexpected invalid backfill response: status=%d called=%t", response.StatusCode, called)
+	}
+}
+
+func TestManualRunEndpointRejectsUnknownFields(t *testing.T) {
+	called := false
+	server := httptest.NewServer(manualRunHandler(func(*manualBackfillRequest) error {
+		called = true
+		return nil
+	}))
+	defer server.Close()
+
+	response, err := http.Post(server.URL+"/run", "application/json", strings.NewReader(`{"unknown":true}`))
+	if err != nil {
+		t.Fatalf("POST /run: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || called {
+		t.Fatalf("unexpected unknown-field response: status=%d called=%t", response.StatusCode, called)
 	}
 }
 
