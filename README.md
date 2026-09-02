@@ -45,10 +45,20 @@ timestamps:
 ### Manual trigger endpoint
 
 Pass `-listen-addr` to keep the downloader running as a small HTTP service.
-`POST /run` performs one normal daily download and returns only after both
-meter requests have finished. Concurrent requests return `409 Conflict`, so a
-manual trigger cannot overlap another manual trigger. `GET /healthz` returns
-`204 No Content`.
+`POST /run` with an empty body performs one normal daily download and returns
+only after both meter requests have finished. To re-fetch a historical window,
+send JSON with RFC3339 UTC bounds and an optional usage type (default `both`):
+
+```sh
+curl --fail-with-body -X POST http://localhost:8790/run \
+  -H 'Content-Type: application/json' \
+  --data '{"period_from":"2026-08-24T00:00:00Z","period_to":"2026-08-31T00:00:00Z","usage_type":"gas"}'
+```
+
+`usage_type` accepts `electricity`, `gas`, or `both`. The request is rejected
+with `400 Bad Request` unless both period bounds are supplied, valid, and
+ordered. Concurrent requests return `409 Conflict`, so a manual trigger cannot
+overlap another manual trigger. `GET /healthz` returns `204 No Content`.
 
 The endpoint has no built-in authentication and must be bound to loopback or
 protected by a reverse proxy. The NixOS deployment exposes it only to the
