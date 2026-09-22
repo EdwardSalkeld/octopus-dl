@@ -52,7 +52,7 @@ golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
 golang.org/x/text/unicode/norm
 golang.org/x/text/width
-# gorm.io/driver/postgres v1.6.2
+# gorm.io/driver/postgres v1.6.3
 ## explicit; go 1.25.0
 gorm.io/driver/postgres
 # gorm.io/driver/sqlite v1.6.0
