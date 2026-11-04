@@ -24,12 +24,26 @@ Configure via a `.env` file (see `.env.example`) or the process environment:
 
 ### Daily download (default)
 
-With no arguments, it downloads yesterday's electricity and gas consumption and
-upserts it into the `usages` table:
+With no arguments, it re-fetches the preceding 14 UTC calendar days of electricity
+and gas consumption, ending at today's UTC midnight, and upserts them into
+the `usages` table:
 
 ```sh
 ./octopus-dl
 ```
+
+Readings may arrive several days after the initial pull. A rolling reconciliation
+window picks them up on a later daily run instead of leaving permanent gaps once
+a date falls outside the former 48-hour window. Existing rows are updated if
+Octopus corrects consumption; empty responses never delete stored readings.
+
+The 14-day range uses the existing sequential 48-hour requests: seven per fuel,
+14 total per daily run. It is not one large request that would exceed the API's
+usual first-page limit. Response auditing, per-request timeouts/retries and the
+shared advisory lock also apply to reconciliation. A failed chunk stops the run;
+the next run retries the overlapping date range. This does not promise that
+Octopus has already published every interval. Gaps or corrections older than
+14 days still require an explicit historical backfill.
 
 ### Backfill
 
