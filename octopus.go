@@ -20,6 +20,9 @@ const (
 	octopusRequestTimeout = 30 * time.Second
 	octopusMaxRetries     = 3
 	octopusChunkSize      = 48 * time.Hour
+	// Revisit older dates because readings can appear after the first daily pull.
+	// Requests stay chunked; widening a single unpaginated request loses data.
+	octopusReconcileDays = 14
 )
 
 // Response matches the overall JSON structure from the API.
@@ -106,11 +109,23 @@ func writeAPITransportFailureToDB(db *gorm.DB, usageType, requestURL string, req
 }
 
 func OctopusElectricityTask(db *gorm.DB) error {
-	return downloadAndStoreUsage(db, buildOctopusURL(electricityBaseURL()), "electricity")
+	return downloadRecentUsage(db, "electricity", time.Now())
 }
 
 func OctopusGasTask(db *gorm.DB) error {
-	return downloadAndStoreUsage(db, buildOctopusURL(gasBaseURL()), "gas")
+	return downloadRecentUsage(db, "gas", time.Now())
+}
+
+func downloadRecentUsage(db *gorm.DB, usageType string, now time.Time) error {
+	periodFrom, periodTo := recentDownloadWindow(now)
+	return OctopusBackfillTask(db, periodFrom, periodTo, usageType)
+}
+
+func recentDownloadWindow(now time.Time) (time.Time, time.Time) {
+	now = now.UTC()
+	year, month, day := now.Date()
+	periodTo := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+	return periodTo.AddDate(0, 0, -octopusReconcileDays), periodTo
 }
 
 func OctopusBackfillTask(db *gorm.DB, periodFrom, periodTo time.Time, usageType string) error {
@@ -143,15 +158,6 @@ func OctopusBackfillTask(db *gorm.DB, periodFrom, periodTo time.Time, usageType 
 	}
 
 	return nil
-}
-
-func buildOctopusURL(baseURL string) string {
-	now := time.Now().UTC()
-	year, month, day := now.Date()
-	periodTo := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
-	periodFrom := periodTo.Add(-octopusChunkSize)
-
-	return buildOctopusURLForWindow(baseURL, periodFrom, periodTo)
 }
 
 func buildOctopusURLForWindow(baseURL string, periodFrom, periodTo time.Time) string {

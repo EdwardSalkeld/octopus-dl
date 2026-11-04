@@ -2,30 +2,12 @@ package main
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
-
-func TestBuildOctopusURL(t *testing.T) {
-	baseURL := "https://api.octopus.energy/v1/electricity-meter-points/2343442199414/meters/24E6010855/consumption/"
-	url := buildOctopusURL(baseURL)
-
-	if !strings.HasPrefix(url, baseURL) {
-		t.Errorf("URL prefix is incorrect")
-	}
-
-	if !strings.Contains(url, "period_from=") {
-		t.Errorf("URL does not contain period_from")
-	}
-
-	if !strings.Contains(url, "period_to=") {
-		t.Errorf("URL does not contain period_to")
-	}
-}
 
 func TestBuildOctopusURLForWindow(t *testing.T) {
 	baseURL := "https://api.octopus.energy/v1/electricity-meter-points/2343442199414/meters/24E6010855/consumption/"
